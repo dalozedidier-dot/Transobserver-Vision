@@ -11,7 +11,6 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Liste "utilisable" pour CI (petits CSV, noms propres)
         file:
           - test_data/minimal_timeseries.csv
           - test_data/GDPDeflator.csv
@@ -44,25 +43,136 @@ jobs:
           chmod +x tools/run_parallel_real.sh || true
           chmod +x tools/smoke_one.py || true
 
-          # IMPORTANT: smoke_one.py prints logs; we only keep LAST LINE as cycle_id
+          # smoke_one.py peut afficher des logs: on ne garde que la DERNIERE ligne comme cycle_id
           CYCLE_ID="$(python3 tools/smoke_one.py \
             --file "${{ matrix.file }}" \
             --mode "${{ matrix.mode }}" | tail -n 1 | tr -d '\r')"
 
           echo "CYCLE_ID=$CYCLE_ID" >> "$GITHUB_ENV"
 
-          # safer output (supports any content)
           {
             echo "cycle_id<<EOF"
             echo "$CYCLE_ID"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-          echo "### Résultat" >> "$GITHUB_STEP_SUMMARY"
-          echo "- file: \`${{ matrix.file }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- mode: \`${{ matrix.mode }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- cycle_id: \`$CYCLE_ID\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Show unified manifest
+      - name: Rapport Summary (CSV + cycle)
+        if: always()
         shell: bash
         run: |
+          set -euo pipefail
+
+          echo "## Rapport test_data" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Fichier: \`${{ matrix.file }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Mode: \`${{ matrix.mode }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cycle_id: \`${{ steps.run.outputs.cycle_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import csv
+          import re
+          from pathlib import Path
+
+          f = Path("${{ matrix.file }}")
+          print("### Statistiques CSV (lecture échantillon)")
+          if not f.exists():
+            print(f"- Statut: fichier introuvable: {f}")
+            raise SystemExit(0)
+
+          # Lecture prudente: pas de pandas, pas d'hypothèse forte sur delimiter
+          # On essaye "," puis ";" si le header semble mono-colonne.
+          def read_rows(delim):
+            with f.open("r", encoding="utf-8", errors="ignore", newline="") as fp:
+              r = csv.reader(fp, delimiter=delim)
+              header = next(r, [])
+              rows = []
+              for i, row in enumerate(r):
+                rows.append(row)
+                if i >= 199:  # 200 lignes max
+                  break
+              return header, rows
+
+          header, rows = read_rows(",")
+          if len(header) <= 1:
+            header2, rows2 = read_rows(";")
+            if len(header2) > len(header):
+              header, rows = header2, rows2
+
+          ncols = len(header)
+          nrows = len(rows)
+
+          na_tokens = {"na", "nan", "null", "none", ""}
+          na_count = 0
+          cell_count = 0
+
+          years = set()
+          year_re = re.compile(r"^(19|20)\\d{2}$")
+
+          for row in rows:
+            for c in row:
+              cell_count += 1
+              v = (c or "").strip()
+              if v.lower() in na_tokens:
+                na_count += 1
+              # détecte années potentielles dans cellules
+              if year_re.match(v):
+                years.add(int(v))
+
+          # détecte années potentielles dans en-têtes (fréquent pour séries annuelles)
+          for h in header:
+            hv = (h or "").strip()
+            if year_re.match(hv):
+              years.add(int(hv))
+
+          print(f"- Colonnes (header): {ncols}")
+          print(f"- Lignes échantillon lues: {nrows} (max 200)")
+          if cell_count:
+            print(f"- NA-like détectés (échantillon): {na_count} / {cell_count}")
+          if years:
+            print(f"- Années détectées (échantillon): {min(years)}–{max(years)}")
+          else:
+            print("- Années détectées (échantillon): aucune")
+          PY
+
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Fichiers produits" >> "$GITHUB_STEP_SUMMARY"
+          CYCLE_DIR="unified_cycles/${{ steps.run.outputs.cycle_id }}"
+          if [ -f "$CYCLE_DIR/unified_manifest.json" ]; then
+            echo "- unified_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- unified_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$CYCLE_DIR/phio/phio_manifest.json" ] || [ -f "$CYCLE_DIR/phio/run_manifest.json" ]; then
+            echo "- PhiO manifest: présent" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- PhiO manifest: absent" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$CYCLE_DIR/systemd/run_manifest.json" ]; then
+            echo "- SystemD run_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- SystemD run_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f "$CYCLE_DIR/sost/run_manifest.json" ]; then
+            echo "- SOST run_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- SOST run_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Show unified manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat "unified_cycles/${{ steps.run.outputs.cycle_id }}/unified_manifest.json" || true
+
+      - name: Upload artifacts (per file)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cycle-${{ matrix.mode }}-${{ matrix.file }}
+          path: |
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/unified_manifest.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/phio/**
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/systemd/**
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/sost/**
