@@ -141,28 +141,9 @@ jobs:
           PY
 
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Fichiers produits" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Fichiers produits (présence)" >> "$GITHUB_STEP_SUMMARY"
           CYCLE_DIR="unified_cycles/${{ steps.run.outputs.cycle_id }}"
-          if [ -f "$CYCLE_DIR/unified_manifest.json" ]; then
-            echo "- unified_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- unified_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f "$CYCLE_DIR/phio/phio_manifest.json" ] || [ -f "$CYCLE_DIR/phio/run_manifest.json" ]; then
-            echo "- PhiO manifest: présent" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- PhiO manifest: absent" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f "$CYCLE_DIR/systemd/run_manifest.json" ]; then
-            echo "- SystemD run_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- SystemD run_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ -f "$CYCLE_DIR/sost/run_manifest.json" ]; then
-            echo "- SOST run_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "- SOST run_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
-          fi
+          [ -f "$CYCLE_DIR/unified_manifest.json" ] && echo "- unified_manifest.json: présent" >> "$GITHUB_STEP_SUMMARY" || echo "- unified_manifest.json: absent" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Show unified manifest
         if: always()
@@ -171,14 +152,29 @@ jobs:
           set -euo pipefail
           cat "unified_cycles/${{ steps.run.outputs.cycle_id }}/unified_manifest.json" || true
 
-      # Sobre: upload uniquement du manifest (rapide, peu gourmand)
-      - name: Upload manifest (default)
+      # Léger mais utile: manifest + quelques rapports lisibles
+      - name: Upload manifest + key reports (default)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: manifest-${{ matrix.mode }}-${{ env.SAFE_FILE }}
-          path: unified_cycles/${{ steps.run.outputs.cycle_id }}/unified_manifest.json
+          name: pack-${{ matrix.mode }}-${{ env.SAFE_FILE }}
           retention-days: 7
+          path: |
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/unified_manifest.json
+
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/phio/phio_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/phio/phio_manifest.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/phio/run_manifest.json
+
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/systemd/extraction_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/systemd/ddr_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/systemd/e_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/systemd/run_manifest.json
+
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/sost/dd_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/sost/ddr_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/sost/e_report.json
+            unified_cycles/${{ steps.run.outputs.cycle_id }}/sost/run_manifest.json
 
       # Debug: upload complet uniquement en manuel
       - name: Upload full cycle (manual only)
