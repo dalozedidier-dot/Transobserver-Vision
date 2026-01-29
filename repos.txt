@@ -1,0 +1,7 @@
+# Mets ici tes 5 repos publics au format owner/repo, un par ligne.
+# Exemple:
+# ton-user/DD-Coherence
+# ton-user/PhiO
+# ton-user/SOST-Framework
+# ton-user/Systemd-runner
+# ton-user/transobserver
