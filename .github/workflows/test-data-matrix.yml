@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Discover CSV files in test_data
+      - name: Discover CSV files in test_data (light on push, full on manual)
         id: discover
         shell: bash
         run: |
@@ -65,7 +65,7 @@ jobs:
           cat /tmp/discover_summary.md >> "$GITHUB_STEP_SUMMARY"
 
           echo "files_json=$(cat /tmp/files.json)" >> "$GITHUB_OUTPUT"
-          echo "files_count=$(python3 -c 'import json; print(len(json.load(open("/tmp/files.json"))))')" >> "$GITHUB_OUTPUT"
+          echo "files_count=$(python3 -c 'import json; print(len(json.loads(open("/tmp/files.json","r",encoding="utf-8").read())))')" >> "$GITHUB_OUTPUT"
           echo "skipped_big=$(python3 - <<'PY'
           import os
           from pathlib import Path
@@ -98,6 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      max-parallel: 5
       matrix:
         file: ${{ fromJson(needs.discover.outputs.files_json) }}
         mode: [mock]
@@ -111,8 +112,22 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Make safe artifact name
+        id: safe
+        shell: bash
+        run: |
+          set -euo pipefail
+          SAFE_FILE="${{ matrix.file }}"
+          SAFE_FILE="${SAFE_FILE//\//_}"
+          SAFE_FILE="${SAFE_FILE// /_}"
+          SAFE_FILE="${SAFE_FILE//\(/_}"
+          SAFE_FILE="${SAFE_FILE//\)/_}"
+          echo "SAFE_FILE=$SAFE_FILE" >> "$GITHUB_ENV"
+          echo "safe_file=$SAFE_FILE" >> "$GITHUB_OUTPUT"
+
       - name: Run smoke_one (log + cycle_id)
         id: smoke
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
@@ -123,30 +138,58 @@ jobs:
 
           START_TS="$(date +%s)"
 
-          # On log tout, puis on récupère le cycle_id comme dernière ligne.
+          set +e
           python3 tools/smoke_one.py \
             --file "${{ matrix.file }}" \
             --mode "${{ matrix.mode }}" | tee smoke_log.txt
-
-          CYCLE_ID="$(tail -n 1 smoke_log.txt | tr -d '\r')"
+          RC=$?
+          set -e
 
           END_TS="$(date +%s)"
           DURATION="$((END_TS - START_TS))"
 
-          echo "cycle_id=$CYCLE_ID" >> "$GITHUB_OUTPUT"
-          echo "duration_s=$DURATION" >> "$GITHUB_OUTPUT"
+          CYCLE_ID="$(tail -n 1 smoke_log.txt | tr -d '\r')"
 
-      - name: Make safe artifact name
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          echo "duration_s=$DURATION" >> "$GITHUB_OUTPUT"
+          echo "cycle_id=$CYCLE_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Build per file stats.json
         if: always()
         shell: bash
         run: |
           set -euo pipefail
-          SAFE_FILE="${{ matrix.file }}"
-          SAFE_FILE="${SAFE_FILE//\//_}"
-          SAFE_FILE="${SAFE_FILE// /_}"
-          SAFE_FILE="${SAFE_FILE//\(/_}"
-          SAFE_FILE="${SAFE_FILE//\)/_}"
-          echo "SAFE_FILE=$SAFE_FILE" >> "$GITHUB_ENV"
+
+          RC="${{ steps.smoke.outputs.rc }}"
+          DUR="${{ steps.smoke.outputs.duration_s }}"
+          CID="${{ steps.smoke.outputs.cycle_id }}"
+          FILE="${{ matrix.file }}"
+          MODE="${{ matrix.mode }}"
+          EVENT="${{ github.event_name }}"
+          LIMIT="${{ needs.discover.outputs.limit_label }}"
+
+          OK="false"
+          MANIFEST_PATH="unified_cycles/${CID}/unified_manifest.json"
+          if [ "$RC" = "0" ] && [ -f "$MANIFEST_PATH" ]; then
+            OK="true"
+          fi
+
+          python3 - <<PY
+          import json
+          data = {
+            "event": "${EVENT}",
+            "limit_label": "${LIMIT}",
+            "mode": "${MODE}",
+            "file": "${FILE}",
+            "safe_file": "${{ steps.safe.outputs.safe_file }}",
+            "rc": int("${RC}" or "1"),
+            "ok": ${OK},
+            "duration_s": int("${DUR}" or "0"),
+            "cycle_id": "${CID}",
+          }
+          with open("stats.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+          PY
 
       - name: Job Summary (per file)
         if: always()
@@ -163,28 +206,51 @@ jobs:
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "- Fichier courant: \`${{ matrix.file }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Mode: \`${{ matrix.mode }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Cycle ID: \`${{ steps.smoke.outputs.cycle_id }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Exit code: \`${{ steps.smoke.outputs.rc }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- Durée smoke: \`${{ steps.smoke.outputs.duration_s }} s\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Cycle ID: \`${{ steps.smoke.outputs.cycle_id }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
 
-          echo "### Présence des sorties" >> "$GITHUB_STEP_SUMMARY"
-          CYCLE_DIR="unified_cycles/${{ steps.smoke.outputs.cycle_id }}"
-          [ -f "$CYCLE_DIR/unified_manifest.json" ] && echo "- unified_manifest.json: OK" >> "$GITHUB_STEP_SUMMARY" || echo "- unified_manifest.json: manquant" >> "$GITHUB_STEP_SUMMARY"
-          [ -f "$CYCLE_DIR/phio/phio_manifest.json" ] && echo "- phio_manifest.json: OK" >> "$GITHUB_STEP_SUMMARY" || echo "- phio_manifest.json: manquant" >> "$GITHUB_STEP_SUMMARY"
-          [ -f "$CYCLE_DIR/systemd/run_manifest.json" ] && echo "- systemd/run_manifest.json: OK" >> "$GITHUB_STEP_SUMMARY" || echo "- systemd/run_manifest.json: manquant" >> "$GITHUB_STEP_SUMMARY"
-          [ -f "$CYCLE_DIR/sost/run_manifest.json" ] && echo "- sost/run_manifest.json: OK" >> "$GITHUB_STEP_SUMMARY" || echo "- sost/run_manifest.json: manquant" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${{ steps.smoke.outputs.rc }}" != "0" ]; then
+            echo "### Etat" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Statut: ECHEC" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### Etat" >> "$GITHUB_STEP_SUMMARY"
+            echo "- Statut: OK" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Log smoke_one.py (extrait)" >> "$GITHUB_STEP_SUMMARY"
           echo '```text' >> "$GITHUB_STEP_SUMMARY"
           tail -n 80 smoke_log.txt >> "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Annotation slow run
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          DUR="${{ steps.smoke.outputs.duration_s }}"
+          if [ "${DUR}" -ge 15 ]; then
+            echo "::warning::Run lent (>=15s) sur ${{
+              matrix.file
+            }}: ${DUR}s"
+          fi
+
+      - name: Upload per file stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stats-${{ matrix.mode }}-${{ needs.discover.outputs.limit_label }}-${{ steps.safe.outputs.safe_file }}
+          retention-days: 7
+          path: |
+            stats.json
+
       - name: Upload pack (default)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pack-${{ matrix.mode }}-${{ needs.discover.outputs.limit_label }}-${{ env.SAFE_FILE }}
+          name: pack-${{ matrix.mode }}-${{ needs.discover.outputs.limit_label }}-${{ steps.safe.outputs.safe_file }}
           retention-days: 7
           path: |
             smoke_log.txt
@@ -209,6 +275,127 @@ jobs:
         if: always() && github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
-          name: full-${{ matrix.mode }}-${{ needs.discover.outputs.limit_label }}-${{ env.SAFE_FILE }}
-          path: unified_cycles/${{ steps.smoke.outputs.cycle_id }}/
+          name: full-${{ matrix.mode }}-${{ needs.discover.outputs.limit_label }}-${{ steps.safe.outputs.safe_file }}
           retention-days: 3
+          path: unified_cycles/${{ steps.smoke.outputs.cycle_id }}/
+
+      - name: Fail job if smoke failed
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.smoke.outputs.rc }}" != "0" ]; then
+            exit 1
+          fi
+
+  rollup:
+    if: always()
+    needs: [discover, matrix-test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download stats artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stats-*
+          path: _stats
+          merge-multiple: true
+
+      - name: Aggregate stats and write summary
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json, csv
+          from pathlib import Path
+
+          root = Path("_stats")
+          stats_files = sorted(root.rglob("stats.json"))
+
+          items = []
+          for p in stats_files:
+            try:
+              items.append(json.loads(p.read_text(encoding="utf-8")))
+            except Exception:
+              continue
+
+          total = len(items)
+          ok = sum(1 for x in items if x.get("ok") is True and int(x.get("rc", 1)) == 0)
+          fail = total - ok
+          failure_rate = (fail / total * 100.0) if total else 0.0
+
+          durations = [int(x.get("duration_s", 0)) for x in items]
+          avg_run = (sum(durations) / len(durations)) if durations else 0.0
+
+          slow_sorted = sorted(items, key=lambda x: int(x.get("duration_s", 0)), reverse=True)
+          top_slow = slow_sorted[:10]
+
+          failed_files = [x for x in items if not (x.get("ok") is True and int(x.get("rc", 1)) == 0)]
+
+          out_json = {
+            "total": total,
+            "ok": ok,
+            "fail": fail,
+            "failure_rate_percent": round(failure_rate, 2),
+            "avg_run_s": round(avg_run, 2),
+            "top_slow": [
+              {"file": x.get("file"), "duration_s": x.get("duration_s"), "rc": x.get("rc")}
+              for x in top_slow
+            ],
+            "failed": [
+              {"file": x.get("file"), "rc": x.get("rc"), "cycle_id": x.get("cycle_id")}
+              for x in failed_files
+            ],
+          }
+
+          Path("stats_aggregate.json").write_text(json.dumps(out_json, ensure_ascii=False, indent=2), encoding="utf-8")
+
+          with open("stats_aggregate.csv", "w", encoding="utf-8", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["file","mode","rc","ok","duration_s","cycle_id","event","limit_label"])
+            w.writeheader()
+            for x in items:
+              w.writerow({
+                "file": x.get("file",""),
+                "mode": x.get("mode",""),
+                "rc": x.get("rc",""),
+                "ok": x.get("ok",""),
+                "duration_s": x.get("duration_s",""),
+                "cycle_id": x.get("cycle_id",""),
+                "event": x.get("event",""),
+                "limit_label": x.get("limit_label",""),
+              })
+
+          lines = []
+          lines.append("## Analytics Actions")
+          lines.append(f"- CSV retenus: {total}")
+          lines.append(f"- OK: {ok}")
+          lines.append(f"- Fail: {fail}")
+          lines.append(f"- Failure rate: {round(failure_rate, 2)} %")
+          lines.append(f"- Avg run time: {round(avg_run, 2)} s")
+          lines.append("")
+          lines.append("### Top slow (10)")
+          for x in top_slow:
+            lines.append(f"- `{x.get('file')}`: {x.get('duration_s')} s (rc={x.get('rc')})")
+          lines.append("")
+          if failed_files:
+            lines.append("### Fichiers en echec")
+            for x in failed_files[:50]:
+              lines.append(f"- `{x.get('file')}` (rc={x.get('rc')}, cycle_id={x.get('cycle_id')})")
+          else:
+            lines.append("### Fichiers en echec")
+            lines.append("- Aucun")
+
+          Path("rollup_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+          PY
+
+          cat rollup_summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload aggregated stats
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: actions-stats
+          retention-days: 14
+          path: |
+            stats_aggregate.json
+            stats_aggregate.csv
