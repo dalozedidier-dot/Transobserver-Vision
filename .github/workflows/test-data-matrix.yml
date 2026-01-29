@@ -48,6 +48,12 @@ jobs:
                 continue
 
           Path("/tmp/files.json").write_text(json.dumps(files, separators=(",", ":")), encoding="utf-8")
+          Path("/tmp/meta.json").write_text(json.dumps({
+            "event": event,
+            "max_mb": max_mb,
+            "count": len(files),
+            "skipped_big": skipped_big,
+          }, separators=(",", ":")), encoding="utf-8")
 
           summary = []
           summary.append("## Discover")
@@ -65,23 +71,15 @@ jobs:
           cat /tmp/discover_summary.md >> "$GITHUB_STEP_SUMMARY"
 
           echo "files_json=$(cat /tmp/files.json)" >> "$GITHUB_OUTPUT"
-          echo "files_count=$(python3 -c 'import json; print(len(json.loads(open("/tmp/files.json","r",encoding="utf-8").read())))')" >> "$GITHUB_OUTPUT"
+          echo "files_count=$(python3 - <<'PY'
+          import json
+          print(json.load(open("/tmp/meta.json","r",encoding="utf-8"))["count"])
+          PY
+          )" >> "$GITHUB_OUTPUT"
+
           echo "skipped_big=$(python3 - <<'PY'
-          import os
-          from pathlib import Path
-          event=os.environ.get("GITHUB_EVENT_NAME","")
-          max_mb=50 if event=="workflow_dispatch" else 5
-          max_bytes=max_mb*1024*1024
-          root=Path("test_data")
-          skipped=0
-          if root.exists():
-            for p in root.rglob("*.csv"):
-              try:
-                if p.stat().st_size > max_bytes:
-                  skipped += 1
-              except FileNotFoundError:
-                pass
-          print(skipped)
+          import json
+          print(json.load(open("/tmp/meta.json","r",encoding="utf-8"))["skipped_big"])
           PY
           )" >> "$GITHUB_OUTPUT"
 
@@ -148,6 +146,7 @@ jobs:
           END_TS="$(date +%s)"
           DURATION="$((END_TS - START_TS))"
 
+          # Dernière ligne = cycle_id (si le script respecte la convention)
           CYCLE_ID="$(tail -n 1 smoke_log.txt | tr -d '\r')"
 
           echo "rc=$RC" >> "$GITHUB_OUTPUT"
@@ -176,6 +175,10 @@ jobs:
 
           python3 - <<PY
           import json
+
+          ok_str = "${OK}"
+          ok = True if ok_str == "true" else False
+
           data = {
             "event": "${EVENT}",
             "limit_label": "${LIMIT}",
@@ -183,10 +186,11 @@ jobs:
             "file": "${FILE}",
             "safe_file": "${{ steps.safe.outputs.safe_file }}",
             "rc": int("${RC}" or "1"),
-            "ok": ${OK},
+            "ok": ok,
             "duration_s": int("${DUR}" or "0"),
             "cycle_id": "${CID}",
           }
+
           with open("stats.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
           PY
@@ -232,9 +236,7 @@ jobs:
           set -euo pipefail
           DUR="${{ steps.smoke.outputs.duration_s }}"
           if [ "${DUR}" -ge 15 ]; then
-            echo "::warning::Run lent (>=15s) sur ${{
-              matrix.file
-            }}: ${DUR}s"
+            echo "::warning::Run lent (>=15s) sur ${{ matrix.file }}: ${DUR}s"
           fi
 
       - name: Upload per file stats
@@ -377,12 +379,11 @@ jobs:
           for x in top_slow:
             lines.append(f"- `{x.get('file')}`: {x.get('duration_s')} s (rc={x.get('rc')})")
           lines.append("")
+          lines.append("### Fichiers en echec")
           if failed_files:
-            lines.append("### Fichiers en echec")
             for x in failed_files[:50]:
               lines.append(f"- `{x.get('file')}` (rc={x.get('rc')}, cycle_id={x.get('cycle_id')})")
           else:
-            lines.append("### Fichiers en echec")
             lines.append("- Aucun")
 
           Path("rollup_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
