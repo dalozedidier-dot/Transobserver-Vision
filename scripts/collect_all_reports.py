@@ -42,7 +42,7 @@ def read_repos(repos_file: Path) -> List[str]:
             continue
         repos.append(line)
     if not repos:
-        raise SystemExit(f"Aucun repo trouvé dans {repos_file}")
+        raise SystemExit(f"Aucun repo trouvé dans {repos_file} (les lignes vides ou commençant par '#' sont ignorées). Ajoute des lignes au format owner/repo.")
     return repos
 
 
