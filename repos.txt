@@ -1,5 +1,11 @@
-MonOrg/Systemd-runner
-MonOrg/SOST-Framework
-MonOrg/PhiO
-MonOrg/DD-Coherence
-MonOrg/transobserver
+# Liste des repos au format owner/repo
+# Exemple:
+# dalozedidier-dot/Loki
+#
+# Remplis avec tes 5 repos.
+
+dalozedidier-dot/Loki
+dalozedidier-dot/Hulk
+dalozedidier-dot/Vision
+dalozedidier-dot/Captain-America
+dalozedidier-dot/PhiO
