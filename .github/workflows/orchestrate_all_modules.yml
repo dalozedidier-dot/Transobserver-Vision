@@ -16,13 +16,9 @@ on:
         required: false
         default: "true"
 
-# Important:
-# - Pour déclencher des workflows dans d'autres repos, GH_TOKEN doit être un PAT (recommandé).
-# - github.token est souvent insuffisant en cross-repo.
-#
-# Secret attendu (repo orchestrateur):
-# - GH_PAT : PAT classic avec scopes "workflow" et "repo" (ou "public_repo" si tout est public)
-#   ou Fine-grained PAT avec accès aux 5 repos + Actions (read/write) + Contents (read).
+# Notes
+# - Cross-repo: GITHUB_TOKEN (github.token) est bloqué -> HTTP 403 "Resource not accessible by integration".
+# - Il faut un secret GH_PAT (PAT) dans le repo orchestrateur.
 
 permissions:
   contents: read
@@ -49,18 +45,22 @@ jobs:
           python -m pip install -U pip
           python -m pip install pyyaml
 
-      - name: Preflight auth and gh
+      - name: Require GH_PAT (cross-repo dispatch)
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          GH_PAT: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
-          echo "GH_TOKEN length: ${#GH_TOKEN}"
-          gh --version
-          gh auth status -h github.com || true
+          if [ -z "${GH_PAT}" ]; then
+            echo "ERREUR: secret GH_PAT manquant."
+            echo "Ce workflow doit déclencher des workflows dans d'autres repos, et github.token est bloqué (403)."
+            echo "Ajoute un secret repo nommé GH_PAT (PAT) puis relance."
+            exit 2
+          fi
+          echo "GH_PAT OK (length=${#GH_PAT})"
 
       - name: Orchestrate
         env:
-          GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
+          GH_TOKEN: ${{ secrets.GH_PAT }}
         run: |
           set -euo pipefail
           KEEP="--keep-going"

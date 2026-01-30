@@ -40,8 +40,10 @@ def write_text(path: Path, content: str) -> None:
 @dataclass
 class WorkflowTarget:
     repo: str
+    id: Optional[int] = None
     name: Optional[str] = None
     file: Optional[str] = None
+    label: Optional[str] = None
 
 
 @dataclass
@@ -57,12 +59,23 @@ def load_targets(path: Path) -> List[RepoTarget]:
         repo = str(t["repo"])
         wfs: List[WorkflowTarget] = []
         for w in t.get("workflows", []):
-            wfs.append(WorkflowTarget(repo=repo, name=w.get("name"), file=w.get("file")))
+            wf_id = w.get("id")
+            wfs.append(
+                WorkflowTarget(
+                    repo=repo,
+                    id=int(wf_id) if wf_id is not None else None,
+                    name=w.get("name"),
+                    file=w.get("file"),
+                    label=w.get("label"),
+                )
+            )
         out.append(RepoTarget(repo=repo, workflows=wfs))
     return out
 
 
 def selector(wf: WorkflowTarget) -> Optional[str]:
+    if wf.id is not None:
+        return str(wf.id)
     return wf.file or wf.name
 
 
@@ -84,6 +97,7 @@ def gh_find_latest_run_id(owner: str, repo: str, wf: WorkflowTarget, timeout_s: 
     sel = selector(wf)
     if not sel:
         return None
+
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         cmd = [
@@ -119,13 +133,17 @@ def gh_wait_run(owner: str, repo: str, run_id: int, poll_s: int = 10, timeout_s:
             last = {"error": "gh_run_view_failed", "output": out.strip()}
             time.sleep(poll_s)
             continue
+
         try:
             last = json.loads(out)
         except Exception:
             last = {"error": "json_parse_failed", "output": out.strip()}
+
         if last.get("status") == "completed":
             return last
+
         time.sleep(poll_s)
+
     last["error"] = "timeout"
     return last
 
@@ -162,17 +180,23 @@ def main() -> int:
 
     any_fail = False
 
+    print("=== PRE-FLIGHT: gh workflow list ===", flush=True)
     for rt in targets:
         rc, out = gh_workflow_list(args.owner, rt.repo)
+        print(f"[{rt.repo}] rc={rc}", flush=True)
         summary["preflight"].append({"repo": rt.repo, "rc": rc, "output": out.strip()})
         write_text(out_dir / "preflight" / f"{rt.repo}_workflow_list.txt", out)
 
     for rt in targets:
         for wf in rt.workflows:
-            label = selector(wf) or "unknown"
+            sel = selector(wf) or "unknown"
+            label = wf.label or wf.name or wf.file or sel
+            print(f"=== TRIGGER {rt.repo} :: {label} (selector={sel}) ===", flush=True)
+
             run_rec: Dict[str, Any] = {
                 "repo": rt.repo,
                 "workflow": label,
+                "selector": sel,
                 "utc_start": now_utc(),
                 "trigger": {},
                 "run": {},
@@ -183,18 +207,17 @@ def main() -> int:
 
             if not ok:
                 any_fail = True
+                print(f"FAILED trigger: {out}", flush=True)
                 run_rec["utc_end"] = now_utc()
                 summary["runs"].append(run_rec)
                 if not args.keep_going:
-                    summary["utc_end"] = now_utc()
-                    summary["overall_rc"] = 1
-                    write_json(out_dir / "summary.json", summary)
-                    return 1
+                    break
                 continue
 
-            run_id = gh_find_latest_run_id(args.owner, rt.repo, wf, timeout_s=120)
+            run_id = gh_find_latest_run_id(args.owner, rt.repo, wf, timeout_s=180)
             if run_id is None:
                 any_fail = True
+                print("FAILED: run_id_not_found", flush=True)
                 run_rec["run"] = {"error": "run_id_not_found"}
                 run_rec["utc_end"] = now_utc()
                 summary["runs"].append(run_rec)
@@ -203,8 +226,10 @@ def main() -> int:
                 continue
 
             run_rec["run"]["id"] = run_id
+            print(f"Waiting run_id={run_id} ...", flush=True)
             view = gh_wait_run(args.owner, rt.repo, run_id, poll_s=10, timeout_s=5400)
             run_rec["run"]["view"] = view
+            print(f"Completed: status={view.get('status')} conclusion={view.get('conclusion')}", flush=True)
 
             concl = (view.get("conclusion") or "").lower()
             if concl not in ("success", ""):
@@ -214,6 +239,7 @@ def main() -> int:
                 dest = out_dir / "artifacts" / rt.repo / f"{label}_{run_id}"
                 dl_ok, dl_out = gh_download_artifacts(args.owner, rt.repo, run_id, dest)
                 run_rec["run"]["download"] = {"ok": dl_ok, "dest": str(dest), "output": dl_out}
+                print(f"Artifacts download ok={dl_ok}", flush=True)
 
             run_rec["utc_end"] = now_utc()
             summary["runs"].append(run_rec)
