@@ -1,0 +1,26 @@
+# Configuration des workflows à lancer dans chaque repo.
+# Pour éviter les ambiguités (deux workflows avec le même nom),
+# tu peux remplacer "name" par "file" si tu connais le nom du fichier YAML du workflow (ex: smoke.yml).
+
+targets:
+  - repo: Captain-America
+    workflows:
+      - name: "Band suite (SOST)"
+
+  - repo: PhiO
+    workflows:
+      - name: "Smoke PhiO (stable)"
+
+  - repo: Hulk
+    workflows:
+      - name: "Smoke (Systemd-runner)"
+
+  - repo: Vision
+    workflows:
+      - name: "Collect all reports"
+
+  - repo: Loki
+    workflows:
+      - name: "band-suite (isolated)"
+      - name: "dd-smoke"
+      - name: "CI Optimized"
